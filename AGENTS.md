@@ -806,9 +806,8 @@ Use something close to:
 │   ├── app.webmanifest
 │   ├── offline.html
 │   └── icons/
-│       ├── icon-192.png
-│       ├── icon-512.png
-│       └── icon-512-maskable.png
+│       ├── icon.svg
+│       └── icon-maskable.svg
 │
 ├── sw.js
 │
@@ -1142,12 +1141,10 @@ Protect all application routes except:
 Use a production secret such as:
 
 ```text
-ADMIN_PASSWORD_HASH
+ADMIN_PASSWORD
 ```
 
-Never store a plaintext production password.
-
-Use a modern password hashing approach, preferably Argon2id or bcrypt with a small, well-audited dependency.
+Store the plaintext production password only in the Fly secret/environment variable. Compare submitted passwords with `crypto/subtle.ConstantTimeCompare`; never store or log the value.
 
 Session cookies in production must be:
 
@@ -1335,19 +1332,15 @@ Use values conceptually like:
   "prefer_related_applications": false,
   "icons": [
     {
-      "src": "/static/icons/icon-192.png",
-      "sizes": "192x192",
-      "type": "image/png"
+      "src": "/static/icons/icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any"
     },
     {
-      "src": "/static/icons/icon-512.png",
-      "sizes": "512x512",
-      "type": "image/png"
-    },
-    {
-      "src": "/static/icons/icon-512-maskable.png",
-      "sizes": "512x512",
-      "type": "image/png",
+      "src": "/static/icons/icon-maskable.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
       "purpose": "maskable"
     }
   ]
@@ -1364,10 +1357,9 @@ Do not add manifest capabilities with no product need.
 
 Provide local icons at minimum:
 
-- 192x192
-- 512x512
+- scalable SVG
 
-Prefer a 512x512 maskable icon as well.
+Provide a maskable SVG icon as well so all committed icon assets remain text-reviewable.
 
 Keep the icon visually minimal and professional.
 
@@ -1398,9 +1390,8 @@ The service worker may cache ONLY approved static, non-sensitive assets such as:
 /static/app.js
 /static/htmx.min.js
 /static/app.webmanifest
-/static/icons/icon-192.png
-/static/icons/icon-512.png
-/static/icons/icon-512-maskable.png
+/static/icons/icon.svg
+/static/icons/icon-maskable.svg
 /static/offline.html
 ```
 
@@ -1553,7 +1544,7 @@ Support configuration via environment variables such as:
 ```text
 PORT=8080
 DATABASE_PATH=/data/noten.db
-ADMIN_PASSWORD_HASH=...
+ADMIN_PASSWORD=...
 APP_ENV=production
 TZ=Europe/Berlin
 ```
@@ -2581,6 +2572,18 @@ Do not finish with a vague "ready to deploy" if authenticated deployment access 
 ---
 
 # Final engineering principle
+
+## Change safety (core product behavior)
+
+The gradebook includes a durable, append-only audit history for successful changes to grades, assessments, students, and classes. Every audited domain mutation and its audit row must commit in the same SQLite transaction. Failed mutations must never appear as successful history.
+
+Recent changes expose a compact immediate **Rückgängig** action. Undo references a server-side audit row, verifies that the current state still matches that row's resulting state, and refuses stale or conflicting undo rather than overwriting a newer change. An undo is itself appended to history. Grade history may intentionally restore an older value; this also appends a new restore entry and never rewrites existing history.
+
+Classes, students, and assessments use soft deletion. Active queries and calculations exclude deleted records, while grades and relationships remain intact. The secondary **Gelöschte Elemente** view restores each entity independently; restoring a parent must not silently restore children that were separately deleted.
+
+History, undo, trash, and restore routes are authenticated, use the existing cross-origin protection, and are never cached. The service-worker cache allowlist must remain limited to non-sensitive static assets. Keep grade-entry undo subtle and temporary so class-wide entry still advances immediately without confirmation dialogs.
+
+Do not replace this mechanism with event sourcing, CQRS, a queue, a second datastore, or client-side authoritative state. Domain tables remain the source of truth and SQLite remains the sole persistent store.
 
 This is a personal tool, not a startup platform.
 
