@@ -1,0 +1,4 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="Noten">
+  <rect width="512" height="512" rx="96" fill="#20201e"/>
+  <path fill="#f7f7f5" d="M132 112h62l124 190V112h62v288h-62L194 210v190h-62z"/>
+</svg>
