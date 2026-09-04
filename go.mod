@@ -4,7 +4,6 @@ go 1.25.0
 
 require (
 	github.com/alexedwards/scs/v2 v2.9.0
-	golang.org/x/crypto v0.43.0
 	modernc.org/sqlite v1.39.1
 )
 

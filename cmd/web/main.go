@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/subtle"
 	"database/sql"
 	"embed"
 	"encoding/csv"
@@ -23,7 +24,6 @@ import (
 
 	"github.com/alexedwards/scs/v2"
 	"github.com/example/noten/internal/calc"
-	"golang.org/x/crypto/bcrypt"
 	_ "modernc.org/sqlite"
 )
 
@@ -54,10 +54,10 @@ func (s sqliteStore) DeleteExpired() error {
 }
 
 type App struct {
-	db           *sql.DB
-	sessions     *scs.SessionManager
-	passwordHash string
-	prod         bool
+	db            *sql.DB
+	sessions      *scs.SessionManager
+	adminPassword string
+	prod          bool
 }
 type Class struct {
 	ID            int64
@@ -158,7 +158,7 @@ func main() {
 	sm.Cookie.SameSite = http.SameSiteLaxMode
 	prod := os.Getenv("APP_ENV") == "production"
 	sm.Cookie.Secure = prod
-	a := &App{db: db, sessions: sm, passwordHash: os.Getenv("ADMIN_PASSWORD_HASH"), prod: prod}
+	a := &App{db: db, sessions: sm, adminPassword: os.Getenv("ADMIN_PASSWORD"), prod: prod}
 	mux := http.NewServeMux()
 	a.routes(mux)
 	h := sm.LoadAndSave(a.security(mux))
@@ -281,15 +281,18 @@ func (a *App) need(h http.HandlerFunc) http.HandlerFunc {
 	}
 }
 func (a *App) loginPage(w http.ResponseWriter, r *http.Request) {
-	render(w, Page{Title: "Anmelden"}, loginHTML)
+	p := Page{Title: "Anmelden"}
+	if a.prod && a.adminPassword == "" {
+		p.Error = "Kein Administrator-Passwort konfiguriert."
+	}
+	render(w, p, loginHTML)
 }
 func (a *App) login(w http.ResponseWriter, r *http.Request) {
 	_ = r.ParseForm()
-	ok := false
-	if a.passwordHash != "" {
-		ok = bcrypt.CompareHashAndPassword([]byte(a.passwordHash), []byte(r.FormValue("password"))) == nil
-	} else if !a.prod {
-		ok = r.FormValue("password") == env("DEV_PASSWORD", "noten")
+	ok, configured := a.validPassword(r.FormValue("password"))
+	if !configured {
+		render(w, Page{Title: "Anmelden", Error: "Kein Administrator-Passwort konfiguriert."}, loginHTML)
+		return
 	}
 	if !ok {
 		render(w, Page{Title: "Anmelden", Error: "Passwort ist nicht korrekt."}, loginHTML)
@@ -297,6 +300,16 @@ func (a *App) login(w http.ResponseWriter, r *http.Request) {
 	}
 	a.sessions.Put(r.Context(), "auth", true)
 	http.Redirect(w, r, "/", 303)
+}
+func (a *App) validPassword(submitted string) (valid, configured bool) {
+	expected := a.adminPassword
+	if !a.prod {
+		expected = env("DEV_PASSWORD", "noten")
+	}
+	if expected == "" {
+		return false, false
+	}
+	return subtle.ConstantTimeCompare([]byte(submitted), []byte(expected)) == 1, true
 }
 func (a *App) logout(w http.ResponseWriter, r *http.Request) {
 	_ = a.sessions.Destroy(r.Context())

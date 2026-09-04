@@ -1141,12 +1141,10 @@ Protect all application routes except:
 Use a production secret such as:
 
 ```text
-ADMIN_PASSWORD_HASH
+ADMIN_PASSWORD
 ```
 
-Never store a plaintext production password.
-
-Use a modern password hashing approach, preferably Argon2id or bcrypt with a small, well-audited dependency.
+Store the plaintext production password only in the Fly secret/environment variable. Compare submitted passwords with `crypto/subtle.ConstantTimeCompare`; never store or log the value.
 
 Session cookies in production must be:
 
@@ -1546,7 +1544,7 @@ Support configuration via environment variables such as:
 ```text
 PORT=8080
 DATABASE_PATH=/data/noten.db
-ADMIN_PASSWORD_HASH=...
+ADMIN_PASSWORD=...
 APP_ENV=production
 TZ=Europe/Berlin
 ```

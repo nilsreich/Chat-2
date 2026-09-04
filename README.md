@@ -17,13 +17,13 @@ make check
 make build
 ```
 
-Set `DEV_PASSWORD` to replace the local password. Production requires `APP_ENV=production` and a bcrypt `ADMIN_PASSWORD_HASH`, with no plaintext fallback. Other variables are `PORT`, `DATABASE_PATH`, and `TZ`; see `.env.example`.
+Set `DEV_PASSWORD` to replace the local password. Production requires `APP_ENV=production` and the Fly secret `ADMIN_PASSWORD`; there is no development fallback in production. Other variables are `PORT`, `DATABASE_PATH`, and `TZ`; see `.env.example`.
 
 Explicit SQL lives in `db/queries`; numbered migrations live in `db/migrations`. Startup enables WAL, foreign keys, a 5-second busy timeout and normal synchronous mode, and applies each migration transactionally once. The service worker caches only an explicit public static allowlist. Private HTML, mutations, CSV, and login data are network-only and `no-store`.
 
 ## Docker, Fly, and CI
 
-Build with `docker build -t noten .`. For first deployment, choose a unique app name in `fly.toml`, run `fly apps create`, `fly volumes create data --region fra --size 1`, set `ADMIN_PASSWORD_HASH` using `fly secrets set`, deploy with `fly deploy --remote-only --ha=false`, and enforce `fly scale count 1`.
+Build with `docker build -t noten .`. For first deployment, choose a unique app name in `fly.toml`, run `fly apps create`, `fly volumes create data --region fra --size 1`, set the login password with `fly secrets set ADMIN_PASSWORD='DEIN_PASSWORT' -a chat-2`, deploy with `fly deploy --remote-only --ha=false`, and enforce `fly scale count 1`. After Fly restarts, log in with exactly that password. Change it later with `fly secrets set ADMIN_PASSWORD='NEUES_PASSWORT' -a chat-2`.
 
 The scratch image is CGO-free. Fly configuration specifies `fra`, one `shared-cpu-1x` Machine at 256 MB, one `/data` volume, HTTPS, actual stop-on-idle, auto-start, and zero minimum running Machines. Verify via `fly machine list` and `fly volumes list`. Pull requests run checks/build; main deploys after checks with an app-scoped `FLY_API_TOKEN` GitHub secret and HA disabled.
 
