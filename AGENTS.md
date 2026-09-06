@@ -413,7 +413,7 @@ No per-grade Save button.
 
 Do not reload the entire page for every grade.
 
-Use HTMX to update only the necessary fragment.
+Use the existing Fetch-based interaction to update only the necessary fragment.
 
 If the save fails:
 
@@ -596,23 +596,11 @@ Do not introduce a Go web framework unless genuinely necessary.
 
 ## HTML templates
 
-Use:
-
-```text
-templ
-```
+Use the existing standard-library `html/template` renderer. Parse the fixed templates once at startup; do not migrate template technology without a product need.
 
 ## Frontend interaction
 
-Use:
-
-```text
-HTMX
-```
-
-Bundle HTMX locally.
-
-Do not load it from a CDN.
+Use the existing small vanilla Fetch interactions. Do not add HTMX or another client library unless a concrete interaction cannot remain simple without it.
 
 ## JavaScript
 
@@ -732,16 +720,16 @@ browser
 → small domain/service function where useful
 → sqlc
 → SQLite
-→ templ
+→ html/template
 → HTML
-→ HTMX
+→ HTML/Fetch
 ```
 
 Do not create a separate JSON API for the frontend.
 
 Normal page navigation returns full HTML pages.
 
-HTMX endpoints return HTML fragments.
+Fetch endpoints return small HTML or JSON responses as appropriate.
 
 Do not introduce unnecessary layers such as:
 
@@ -802,7 +790,6 @@ Use something close to:
 ├── static/
 │   ├── app.css
 │   ├── app.js
-│   ├── htmx.min.js
 │   ├── app.webmanifest
 │   ├── offline.html
 │   └── icons/
@@ -995,9 +982,9 @@ Do not add an ORM.
 
 ---
 
-# 20. templ rules
+# 20. Template rules
 
-Use templ for:
+Use `html/template` for:
 
 - application layout
 - sidebar
@@ -1009,10 +996,6 @@ Use templ for:
 - form fragments
 - error fragments
 
-Generated `*_templ.go` files must be committed to Git.
-
-Do not manually edit generated templ output.
-
 Do not fragment the UI into hundreds of tiny components. Keep components meaningful.
 
 ---
@@ -1023,12 +1006,11 @@ Pin generation tools in the repository.
 
 Prefer Go's supported tool dependency mechanism for:
 
-- templ
 - sqlc
 
 The repository must still compile immediately after clone from committed generated files without requiring generation first.
 
-Generation is required only after changing templ/SQL sources.
+Generation is required only after changing SQL sources.
 
 The same commands must work:
 
@@ -1058,13 +1040,12 @@ Desired semantics:
 
 ## `make generate`
 
-- run templ generation
 - run sqlc generation
 
 ## `make fmt`
 
 - format Go code
-- format templ/source where supported without adding heavy tooling
+- format Go and source files without adding heavy tooling
 
 ## `make test`
 
@@ -1250,7 +1231,7 @@ All production frontend assets must be local.
 
 Bundle:
 
-- HTMX
+- the existing Fetch-based JavaScript
 - CSS
 - JavaScript
 - manifest
@@ -1261,7 +1242,7 @@ Bundle:
 
 Do not load:
 
-- HTMX from a CDN
+- remote JavaScript libraries
 - Google Fonts
 - remote icon libraries
 - unpkg/jsDelivr assets
@@ -1388,7 +1369,6 @@ The service worker may cache ONLY approved static, non-sensitive assets such as:
 ```text
 /static/app.css
 /static/app.js
-/static/htmx.min.js
 /static/app.webmanifest
 /static/icons/icon.svg
 /static/icons/icon-maskable.svg
@@ -1405,7 +1385,7 @@ Never cache:
 - student pages
 - student names
 - assessment responses
-- HTMX fragments containing private data
+- Fetch responses containing private data
 - grade-entry responses
 - login responses
 - POST/PUT/PATCH/DELETE responses
@@ -1428,7 +1408,7 @@ Recommended strategy:
 ```text
 approved static assets -> cache first
 navigation/dynamic HTML -> network only
-HTMX -> network only
+Fetch responses -> network only
 mutations -> network only
 private/authenticated content -> network only
 ```
@@ -1990,9 +1970,9 @@ Do not expose them without authentication.
 
 ---
 
-# 49. HTMX usage
+# 49. Fetch interaction usage
 
-Use HTMX for interactions where it reduces complexity:
+Use small vanilla Fetch interactions where they reduce complexity:
 
 - grade save/update
 - grade cell edit
@@ -2003,7 +1983,7 @@ Use HTMX for interactions where it reduces complexity:
 - dialogs/sheets
 - partial matrix refreshes
 
-Do not force HTMX onto normal navigation that is simpler as regular links.
+Do not force Fetch onto normal navigation that is simpler as regular links.
 
 Server/database remains the source of truth.
 
@@ -2140,7 +2120,7 @@ display = 11.3
 
 - health endpoint
 - key page handlers
-- HTMX grade mutation response
+- Fetch grade mutation response
 
 Use temporary SQLite databases.
 
@@ -2277,18 +2257,16 @@ Avoid marketing fluff.
 
 Before adding any dependency, ask internally:
 
-> Can this be implemented cleanly with the Go standard library, HTMX, templ, or a few lines of vanilla JS/CSS?
+> Can this be implemented cleanly with the Go standard library, html/template, or a few lines of vanilla JS/CSS?
 
 If yes, do not add the dependency.
 
 Approved core third-party dependencies are limited to the needs of:
 
-- templ
 - sqlc
 - modernc SQLite
 - SCS v2
 - a well-justified password hash dependency
-- bundled HTMX asset
 
 Everything else requires a clear concrete benefit.
 
@@ -2394,7 +2372,7 @@ Use approximately this sequence:
 15. implement assessment CRUD
 16. implement grade CRUD/UPSERT
 17. implement calculated averages
-18. build templ layout/sidebar
+18. build html/template layout/sidebar
 19. build grade matrix
 20. build assessment creation/editing
 21. build fast grade-entry flow

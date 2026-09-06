@@ -2,14 +2,11 @@ package main
 
 import (
 	"context"
-	"crypto/subtle"
 	"database/sql"
-	"embed"
 	"encoding/csv"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"html/template"
 	"io/fs"
 	"log/slog"
 	"net/http"
@@ -19,16 +16,17 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
 	"github.com/alexedwards/scs/v2"
+	gradebook "github.com/example/noten"
 	"github.com/example/noten/internal/calc"
 	_ "modernc.org/sqlite"
 )
 
-//go:embed migrations/*.sql static/* static/icons/* sw.js
-var files embed.FS
+var files = gradebook.Files
 
 type sqliteStore struct{ db *sql.DB }
 
@@ -58,6 +56,12 @@ type App struct {
 	sessions      *scs.SessionManager
 	adminPassword string
 	prod          bool
+	loginMu       sync.Mutex
+	loginAttempts map[string]loginAttempt
+}
+type loginAttempt struct {
+	Count int
+	Since time.Time
 }
 type Class struct {
 	ID            int64
@@ -83,19 +87,20 @@ type Row struct {
 	Result  calc.Result
 }
 type Page struct {
-	Title       string
-	Classes     []Class
-	Class       *Class
-	Students    []Student
-	Assessments []Assessment
-	Rows        []Row
-	Assessment  *Assessment
-	Error       string
-	Auth        bool
-	Notice      string
-	UndoID      int64
-	History     []Audit
-	Deleted     Trash
+	Title         string
+	Classes       []Class
+	Class         *Class
+	Students      []Student
+	Assessments   []Assessment
+	Rows          []Row
+	Assessment    *Assessment
+	Error         string
+	Auth          bool
+	Notice        string
+	UndoID        int64
+	History       []Audit
+	Deleted       Trash
+	ActiveStudent int64
 }
 
 type Audit struct {
@@ -158,7 +163,7 @@ func main() {
 	sm.Cookie.SameSite = http.SameSiteLaxMode
 	prod := os.Getenv("APP_ENV") == "production"
 	sm.Cookie.Secure = prod
-	a := &App{db: db, sessions: sm, adminPassword: os.Getenv("ADMIN_PASSWORD"), prod: prod}
+	a := &App{db: db, sessions: sm, adminPassword: os.Getenv("ADMIN_PASSWORD"), prod: prod, loginAttempts: make(map[string]loginAttempt)}
 	mux := http.NewServeMux()
 	a.routes(mux)
 	h := sm.LoadAndSave(a.security(mux))
@@ -188,7 +193,7 @@ func migrate(db *sql.DB) error {
 	if e != nil {
 		return e
 	}
-	entries, _ := fs.ReadDir(files, "migrations")
+	entries, _ := fs.ReadDir(files, "db/migrations")
 	for _, f := range entries {
 		var n int
 		if e = db.QueryRow("SELECT count(*) FROM schema_migrations WHERE version=?", f.Name()).Scan(&n); e != nil {
@@ -197,7 +202,7 @@ func migrate(db *sql.DB) error {
 		if n > 0 {
 			continue
 		}
-		b, _ := files.ReadFile("migrations/" + f.Name())
+		b, _ := files.ReadFile("db/migrations/" + f.Name())
 		tx, e := db.Begin()
 		if e != nil {
 			return e
@@ -280,41 +285,7 @@ func (a *App) need(h http.HandlerFunc) http.HandlerFunc {
 		h(w, r)
 	}
 }
-func (a *App) loginPage(w http.ResponseWriter, r *http.Request) {
-	p := Page{Title: "Anmelden"}
-	if a.prod && a.adminPassword == "" {
-		p.Error = "Kein Administrator-Passwort konfiguriert."
-	}
-	render(w, p, loginHTML)
-}
-func (a *App) login(w http.ResponseWriter, r *http.Request) {
-	_ = r.ParseForm()
-	ok, configured := a.validPassword(r.FormValue("password"))
-	if !configured {
-		render(w, Page{Title: "Anmelden", Error: "Kein Administrator-Passwort konfiguriert."}, loginHTML)
-		return
-	}
-	if !ok {
-		render(w, Page{Title: "Anmelden", Error: "Passwort ist nicht korrekt."}, loginHTML)
-		return
-	}
-	a.sessions.Put(r.Context(), "auth", true)
-	http.Redirect(w, r, "/", 303)
-}
-func (a *App) validPassword(submitted string) (valid, configured bool) {
-	expected := a.adminPassword
-	if !a.prod {
-		expected = env("DEV_PASSWORD", "noten")
-	}
-	if expected == "" {
-		return false, false
-	}
-	return subtle.ConstantTimeCompare([]byte(submitted), []byte(expected)) == 1, true
-}
-func (a *App) logout(w http.ResponseWriter, r *http.Request) {
-	_ = a.sessions.Destroy(r.Context())
-	http.Redirect(w, r, "/login", 303)
-}
+
 func id(r *http.Request, key string) int64 {
 	v, _ := strconv.ParseInt(r.PathValue(key), 10, 64)
 	return v
@@ -691,12 +662,26 @@ func (a *App) deleteAssessment(w http.ResponseWriter, r *http.Request) {
 func (a *App) gradeEntry(w http.ResponseWriter, r *http.Request) {
 	n := id(r, "id")
 	var x Assessment
-	if a.db.QueryRow("SELECT id,class_id,name,type,date,weight FROM assessments WHERE id=? AND deleted_at IS NULL", n).Scan(&x.ID, &x.ClassID, &x.Name, &x.Type, &x.Date, &x.Weight) != nil {
+	if a.db.QueryRow("SELECT a.id,a.class_id,a.name,a.type,a.date,a.weight FROM assessments a JOIN classes c ON c.id=a.class_id AND c.deleted_at IS NULL WHERE a.id=? AND a.deleted_at IS NULL", n).Scan(&x.ID, &x.ClassID, &x.Name, &x.Type, &x.Date, &x.Weight) != nil {
 		http.NotFound(w, r)
 		return
 	}
 	ss := a.students(x.ClassID)
-	render(w, Page{Title: x.Name, Class: a.loadClass(x.ClassID), Students: ss, Assessment: &x, Rows: a.rows(x.ClassID, ss, []Assessment{x}), Auth: true}, gradeHTML)
+	active, _ := strconv.ParseInt(r.URL.Query().Get("student"), 10, 64)
+	if active == 0 && len(ss) > 0 {
+		active = ss[0].ID
+	}
+	found := false
+	for _, student := range ss {
+		if student.ID == active {
+			found = true
+			break
+		}
+	}
+	if !found && len(ss) > 0 {
+		active = ss[0].ID
+	}
+	render(w, Page{Title: x.Name, Class: a.loadClass(x.ClassID), Students: ss, Assessment: &x, Rows: a.rows(x.ClassID, ss, []Assessment{x}), ActiveStudent: active, Auth: true}, gradeHTML)
 }
 func (a *App) saveGrade(w http.ResponseWriter, r *http.Request) {
 	aid, sid := id(r, "id"), id(r, "student")
@@ -705,6 +690,22 @@ func (a *App) saveGrade(w http.ResponseWriter, r *http.Request) {
 	tx, e := a.db.Begin()
 	if e != nil {
 		http.Error(w, "Speichern fehlgeschlagen", 500)
+		return
+	}
+	var classID int64
+	e = tx.QueryRow(`SELECT a.class_id
+		FROM assessments a
+		JOIN students s ON s.id=? AND s.class_id=a.class_id AND s.deleted_at IS NULL
+		JOIN classes c ON c.id=a.class_id AND c.deleted_at IS NULL
+		WHERE a.id=? AND a.deleted_at IS NULL`, sid, aid).Scan(&classID)
+	if errors.Is(e, sql.ErrNoRows) {
+		tx.Rollback()
+		http.Error(w, "Schüler und Leistung gehören nicht zu derselben aktiven Klasse.", http.StatusUnprocessableEntity)
+		return
+	}
+	if e != nil {
+		tx.Rollback()
+		http.Error(w, "Speichern fehlgeschlagen", http.StatusInternalServerError)
 		return
 	}
 	before, e := gradeSnapshot(tx, aid, sid)
@@ -1068,19 +1069,3 @@ func cell(c Cell) string {
 	}
 	return strconv.Itoa(*c.Points)
 }
-func render(w http.ResponseWriter, p Page, body string) {
-	f := template.FuncMap{"avg": calc.Format, "cell": cell, "today": func() string { return time.Now().Format("2006-01-02") }}
-	t := template.Must(template.New("page").Funcs(f).Parse(layout + body))
-	if e := t.ExecuteTemplate(w, "layout", p); e != nil {
-		slog.Error("render failed", "error", e)
-	}
-}
-
-const layout = `{{define "layout"}}<!doctype html><html lang="de"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="theme-color" content="#f7f7f5"><title>{{.Title}} · Noten</title><link rel="manifest" href="/static/app.webmanifest"><link rel="icon" href="/static/icons/icon.svg"><link rel="stylesheet" href="/static/app.css"><script defer src="/static/htmx.min.js"></script><script defer src="/static/app.js"></script></head><body>{{if .Notice}}<aside class="undo-bar" data-undo-bar><span>{{.Notice}}</span>{{if .UndoID}}<form method="post" action="/changes/{{.UndoID}}/undo"><input type="hidden" name="return" value="/"><button>Rückgängig</button></form>{{end}}</aside>{{end}}{{template "body" .}}</body></html>{{end}}`
-const loginHTML = `{{define "body"}}<main class="login"><form method="post" class="panel"><h1>Noten</h1><p class="muted">Privates Gradebook</p>{{if .Error}}<p class="error">{{.Error}}</p>{{end}}<label>Passwort<input name="password" type="password" required autofocus autocomplete="current-password"></label><button>Anmelden</button></form></main>{{end}}`
-const appHTML = `{{define "body"}}<div class="shell"><aside><header><strong>Klassen</strong><form method="post" action="/logout"><button class="quiet">Abmelden</button></form></header><nav>{{range .Classes}}<a href="/?class={{.ID}}" {{if $.Class}}{{if eq .ID $.Class.ID}}class="active"{{end}}{{end}}>{{.Name}} <small>{{.Subject}}</small></a>{{end}}</nav><a class="trash-link" href="/trash">Gelöschte Elemente</a><details><summary>+ Klasse</summary><form method="post" action="/classes"><label>Name<input name="name" required></label><label>Fach<input name="subject"></label><button>Erstellen</button></form></details></aside><main class="workspace">{{if .Class}}<header class="top"><div><h1>{{.Class.Name}}</h1><span class="muted">{{.Class.Subject}}</span></div><button data-open="assessment">+ Leistung</button></header><div class="matrix"><table><thead><tr><th>Name</th>{{range .Assessments}}<th><a href="/assessments/{{.ID}}/grades">{{.Name}}</a><small>{{.Type}}</small></th>{{end}}<th>S</th><th>M</th><th>Ø</th></tr></thead><tbody>{{$page:=.}}{{range .Rows}}{{$row:=.}}<tr><th><a href="/students/{{.Student.ID}}">{{.Student.First}} {{.Student.Last}}</a></th>{{range $a:=$page.Assessments}}<td><a href="/assessments/{{$a.ID}}/grades">{{cell (index $row.Cells $a.ID)}}</a></td>{{end}}<td>{{avg .Result.Written}}</td><td>{{avg .Result.Oral}}</td><td class="overall">{{avg .Result.Overall}}</td></tr>{{else}}<tr><td colspan="99" class="empty">Noch keine Schüler. Über „Verwalten“ hinzufügen.</td></tr>{{end}}</tbody></table></div><details class="manage"><summary>Verwalten & Export</summary><div class="manage-grid"><form method="post" action="/classes/{{.Class.ID}}/edit"><h2>Klasse <a class="history-link" href="/history?type=class&entity={{.Class.ID}}">Verlauf</a></h2><label>Name<input name="name" value="{{.Class.Name}}" required></label><label>Fach<input name="subject" value="{{.Class.Subject}}"></label><label>Schriftlich %<input type="number" name="written" value="{{.Class.Written}}" min="0" max="100"></label><label>Mündlich %<input type="number" name="oral" value="{{.Class.Oral}}" min="0" max="100"></label><button>Speichern</button></form><form method="post" action="/classes/{{.Class.ID}}/students"><h2>Schüler hinzufügen</h2><label>Ein Name pro Zeile<textarea name="names" rows="6" required></textarea></label><button>Hinzufügen</button></form><section><h2>Schüler</h2>{{range .Students}}<form class="inline" method="post" action="/students/{{.ID}}/edit"><a class="history-link" href="/history?type=student&entity={{.ID}}">Verlauf</a><input name="first" value="{{.First}}" aria-label="Vorname"><input name="last" value="{{.Last}}" aria-label="Nachname"><button>Speichern</button><button class="danger" formaction="/students/{{.ID}}/delete" data-confirm="Schüler ausblenden? Vorhandene Noten bleiben erhalten und können wiederhergestellt werden.">Löschen</button></form>{{end}}</section><section><h2>Leistungen</h2>{{range .Assessments}}<form class="inline" method="post" action="/assessments/{{.ID}}/edit"><a class="history-link" href="/history?type=assessment&entity={{.ID}}">Verlauf</a><input name="name" value="{{.Name}}"><select name="type"><option value="written" {{if eq .Type "written"}}selected{{end}}>Klassenarbeit</option><option value="test" {{if eq .Type "test"}}selected{{end}}>Test</option><option value="oral" {{if eq .Type "oral"}}selected{{end}}>Mündlich</option></select><input name="date" type="date" value="{{.Date}}"><input name="weight" type="number" min="0.1" step="0.1" value="{{.Weight}}"><button>Speichern</button><button class="danger" formaction="/assessments/{{.ID}}/delete" data-confirm="Leistung ausblenden? Vorhandene Noten bleiben erhalten und können wiederhergestellt werden.">Löschen</button></form>{{end}}</section><p><a class="button" href="/classes/{{.Class.ID}}/export.csv">CSV exportieren</a></p><form method="post" action="/classes/{{.Class.ID}}/delete"><button class="danger" data-confirm="Klasse ausblenden? Alle Daten bleiben erhalten und können wiederhergestellt werden.">Klasse löschen</button></form></div></details><dialog id="assessment"><form method="post" action="/classes/{{.Class.ID}}/assessments"><header><h2>Neue Leistung</h2><button type="button" data-close aria-label="Schließen">×</button></header><label>Name<input name="name" required autofocus></label><label>Typ<select name="type" data-type><option value="test">Test</option><option value="written">Klassenarbeit</option><option value="oral">Mündliche Note</option></select></label><label>Datum<input name="date" type="date" value="{{today}}" required></label><label>Gewichtung<input name="weight" type="number" min="0.1" step="0.1" value="1" required></label><footer><button type="button" class="secondary" data-close>Abbrechen</button><button>Erstellen</button></footer></form></dialog>{{else}}<div class="welcome"><h1>Erste Klasse anlegen</h1><p>Lege links eine Klasse an und beginne direkt mit der Notenerfassung.</p></div>{{end}}</main></div>{{end}}`
-const gradeHTML = `{{define "body"}}<main class="entry"><header class="top"><div><a href="/?class={{.Class.ID}}">← Matrix</a><h1>{{.Assessment.Name}}</h1><p class="muted">{{.Class.Name}} · {{.Assessment.Date}} · Gewicht {{.Assessment.Weight}}</p></div></header><div class="entry-grid"><ol class="student-list">{{range $i,$s:=.Students}}<li data-student="{{$s.ID}}" {{if eq $i 0}}class="active"{{end}}><span>{{$s.First}} {{$s.Last}}</span><span><output id="grade-{{$s.ID}}">{{cell (index (index $.Rows $i).Cells $.Assessment.ID)}}</output><a class="history-link" href="/history?assessment={{$.Assessment.ID}}&student={{$s.ID}}">Verlauf</a></span></li>{{end}}</ol><section class="pad" aria-label="Notenfeld"><p id="entry-status">Note wählen – danach geht es automatisch weiter.</p><div><button data-grade="0">0</button><button data-grade="1">1</button><button data-grade="2">2</button><button data-grade="3">3</button><button data-grade="4">4</button><button data-grade="5">5</button><button data-grade="6">6</button><button data-grade="7">7</button><button data-grade="8">8</button><button data-grade="9">9</button><button data-grade="10">10</button><button data-grade="11">11</button><button data-grade="12">12</button><button data-grade="13">13</button><button data-grade="14">14</button><button data-grade="15">15</button></div><footer><button data-grade="absent" class="secondary">Fehlt</button><button data-grade="clear" class="secondary">Leeren</button></footer><form id="grade-form" hidden method="post" data-action="/assessments/{{.Assessment.ID}}/grades/"><input name="points"></form></section></div></main>{{end}}`
-const studentHTML = `{{define "body"}}<main class="detail"><a href="/?class={{.Class.ID}}">← {{.Class.Name}}</a><h1>{{.Title}}</h1>{{$r:=index .Rows 0}}<div class="averages"><div><small>Gesamt</small><strong>{{avg $r.Result.Overall}}</strong></div><div><small>Schriftlich</small><strong>{{avg $r.Result.Written}}</strong></div><div><small>Mündlich</small><strong>{{avg $r.Result.Oral}}</strong></div></div><table><tbody>{{range .Assessments}}<tr><th>{{.Name}}<small>{{.Date}}</small></th><td>{{cell (index $r.Cells .ID)}}</td></tr>{{end}}</tbody></table></main>{{end}}`
-
-const historyHTML = `{{define "body"}}<main class="detail"><a href="/">← Noten</a><h1>Änderungsverlauf</h1><table><thead><tr><th>Zeit</th><th>Aktion</th><th>Vorher</th><th>Nachher</th><th></th></tr></thead><tbody>{{range .History}}<tr><td>{{.CreatedAt}}</td><td>{{.Action}}</td><td><code>{{.Before}}</code></td><td><code>{{.After}}</code></td><td>{{if eq .EntityType "grade"}}<form method="post" action="/history/{{.ID}}/restore"><button class="secondary">Vorherigen Wert wiederherstellen</button></form>{{end}}</td></tr>{{else}}<tr><td colspan="5">Noch keine Änderungen.</td></tr>{{end}}</tbody></table></main>{{end}}`
-const trashHTML = `{{define "body"}}<main class="detail"><a href="/">← Noten</a><h1>Gelöschte Elemente</h1><h2>Klassen</h2>{{range .Deleted.Classes}}<form class="restore-row" method="post" action="/trash/class/{{.ID}}/restore"><span>{{.Name}} <small>{{.Subject}}</small></span><button>Wiederherstellen</button></form>{{else}}<p class="muted">Keine gelöschten Klassen.</p>{{end}}<h2>Schüler</h2>{{range .Deleted.Students}}<form class="restore-row" method="post" action="/trash/student/{{.ID}}/restore"><span>{{.First}} {{.Last}}</span><button>Wiederherstellen</button></form>{{else}}<p class="muted">Keine gelöschten Schüler.</p>{{end}}<h2>Leistungen</h2>{{range .Deleted.Assessments}}<form class="restore-row" method="post" action="/trash/assessment/{{.ID}}/restore"><span>{{.Name}} <small>{{.Date}}</small></span><button>Wiederherstellen</button></form>{{else}}<p class="muted">Keine gelöschten Leistungen.</p>{{end}}</main>{{end}}`

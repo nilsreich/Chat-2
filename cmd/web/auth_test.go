@@ -79,3 +79,17 @@ func TestDevelopmentPasswords(t *testing.T) {
 		}
 	})
 }
+
+func TestLoginFailureLimit(t *testing.T) {
+	a := testApp(t)
+	a.prod = true
+	a.adminPassword = "richtig"
+	for range 5 {
+		if w := loginRequest(t, a, "falsch"); w.Code != http.StatusOK {
+			t.Fatalf("initial failed login returned %d", w.Code)
+		}
+	}
+	if w := loginRequest(t, a, "falsch"); w.Code != http.StatusTooManyRequests {
+		t.Fatalf("sixth failed login returned %d, want 429", w.Code)
+	}
+}

@@ -195,7 +195,7 @@ func TestMigrationUpgradesExistingDatabase(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer db.Close()
-	one, err := files.ReadFile("migrations/001_initial.sql")
+	one, err := files.ReadFile("db/migrations/001_initial.sql")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -219,5 +219,64 @@ func TestMigrationUpgradesExistingDatabase(t *testing.T) {
 	var auditTable int
 	if err = db.QueryRow("SELECT count(*) FROM sqlite_master WHERE type='table' AND name='audit_log'").Scan(&auditTable); err != nil || auditTable != 1 {
 		t.Fatalf("audit table missing: %d %v", auditTable, err)
+	}
+}
+
+func TestGradeRejectsStudentFromAnotherClass(t *testing.T) {
+	a := testApp(t)
+	_, _, assessmentID := seed(t, a)
+	classResult, err := a.db.Exec("INSERT INTO classes(name,subject) VALUES('11b','Mathe')")
+	if err != nil {
+		t.Fatal(err)
+	}
+	otherClassID, _ := classResult.LastInsertId()
+	studentResult, err := a.db.Exec("INSERT INTO students(class_id,first_name,last_name) VALUES(?,?,?)", otherClassID, "Ben", "Falsch")
+	if err != nil {
+		t.Fatal(err)
+	}
+	otherStudentID, _ := studentResult.LastInsertId()
+
+	w := post(a.saveGrade, "/", url.Values{"points": {"12"}}, map[string]string{"id": itoa(assessmentID), "student": itoa(otherStudentID)})
+	if w.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("cross-class grade returned %d: %s", w.Code, w.Body.String())
+	}
+	var grades, audits int
+	a.db.QueryRow("SELECT count(*) FROM grades WHERE assessment_id=? AND student_id=?", assessmentID, otherStudentID).Scan(&grades)
+	a.db.QueryRow("SELECT count(*) FROM audit_log WHERE assessment_id=? AND student_id=?", assessmentID, otherStudentID).Scan(&audits)
+	if grades != 0 || audits != 0 {
+		t.Fatalf("invalid relation wrote grades=%d audits=%d", grades, audits)
+	}
+}
+
+func TestMatrixCellTargetsExactStudent(t *testing.T) {
+	a := testApp(t)
+	cid, studentID, assessmentID := seed(t, a)
+	students, assessments := a.students(cid), a.assessments(cid)
+	p := Page{Title: "Noten", Classes: a.classes(), Class: a.loadClass(cid), Students: students, Assessments: assessments, Rows: a.rows(cid, students, assessments)}
+	w := httptest.NewRecorder()
+	render(w, p, appHTML)
+	want := "/assessments/" + itoa(assessmentID) + "/grades?student=" + itoa(studentID)
+	if !strings.Contains(w.Body.String(), want) {
+		t.Fatalf("matrix does not target exact student; want %q", want)
+	}
+}
+
+func TestGradeEntryClientGuardsRapidInputAndKeyboardConfirmation(t *testing.T) {
+	source, err := files.ReadFile("static/app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	js := string(source)
+	for _, required := range []string{
+		"if (saving || !rows[active]) return",
+		"const savedRow = rows[savedIndex]",
+		"if (event.key === \"Enter\" && keyboardValue !== \"\")",
+		"Speichern fehlgeschlagen. Derselbe Schüler bleibt ausgewählt",
+		"Alle Schüler bearbeitet",
+		"response.redirected",
+	} {
+		if !strings.Contains(js, required) {
+			t.Errorf("missing grade-entry guard %q", required)
+		}
 	}
 }
